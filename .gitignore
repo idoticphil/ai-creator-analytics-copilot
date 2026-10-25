@@ -1,0 +1,21 @@
+# Python virtual environments
+.venv/
+backend/.venv/
+
+# Python cache and testing
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Frontend dependencies and builds
+node_modules/
+dist/
+
+# Editor and operating system
+.DS_Store
+.vscode/
