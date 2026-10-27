@@ -1,3 +1,4 @@
+
 from io import BytesIO
 import json
 
@@ -40,11 +41,13 @@ REQUIRED_FIELDS = {"video_title", "views"}
 
 def normalize_header(header: str) -> str:
     """Normalize CSV headers for case-insensitive matching."""
-    return " ".join(str(header).replace("\ufeff", "").strip().lower().split())
+    return " ".join(
+        str(header).replace("\ufeff", "").strip().lower().split()
+    )
 
 
 def validate_youtube_analytics_csv(file_bytes: bytes) -> dict:
-    """Read, validate, and preview a video-level analytics CSV."""
+    """Read, validate, and prepare a video-level analytics CSV."""
 
     if not file_bytes:
         raise ValueError("The uploaded file is empty.")
@@ -99,7 +102,10 @@ def validate_youtube_analytics_csv(file_bytes: bytes) -> dict:
                 .str.strip()
             )
 
-            numeric_values = pd.to_numeric(raw_values, errors="coerce")
+            numeric_values = pd.to_numeric(
+                raw_values,
+                errors="coerce",
+            )
 
             invalid = (
                 df[source_column].notna()
@@ -116,14 +122,21 @@ def validate_youtube_analytics_csv(file_bytes: bytes) -> dict:
             if field in {"views", "watch_time_hours"}:
                 if (numeric_values.dropna() < 0).any():
                     raise ValueError(
-                        f"Column '{source_column}' cannot contain negative values."
+                        f"Column '{source_column}' cannot contain "
+                        "negative values."
                     )
 
             clean_df[field] = numeric_values
 
         else:
-            clean_df[field] = df[source_column].fillna("").astype(str).str.strip()
+            clean_df[field] = (
+                df[source_column]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+            )
 
+    # Check required values.
     if clean_df["video_title"].eq("").any():
         raise ValueError(
             "Some rows have a missing video title. Please correct the CSV."
@@ -134,6 +147,7 @@ def validate_youtube_analytics_csv(file_bytes: bytes) -> dict:
             "The Views column has missing values. Please correct the CSV."
         )
 
+    # Identify optional metrics that aren't present.
     warnings = []
 
     optional_fields = {
@@ -149,11 +163,92 @@ def validate_youtube_analytics_csv(file_bytes: bytes) -> dict:
             f"Optional metric '{field}' was not found in the uploaded CSV."
         )
 
-    # Convert preview values into JSON-safe Python data.
+    # Validate whole-number fields before storing them in integer columns.
+    for field in ("views", "subscribers"):
+        if field in clean_df:
+            values = clean_df[field].dropna()
+
+            if ((values % 1) != 0).any():
+                raise ValueError(
+                    f"Column '{matched_columns[field]}' "
+                    "must contain whole numbers."
+                )
+
+    # Normalize publication dates to YYYY-MM-DD.
+    if "video_publish_time" in clean_df:
+        raw_dates = (
+            clean_df["video_publish_time"]
+            .astype("string")
+            .str.strip()
+        )
+
+        has_value = raw_dates.notna() & raw_dates.ne("")
+
+        parsed_dates = pd.to_datetime(
+            raw_dates,
+            errors="coerce",
+            utc=True,
+        )
+
+        invalid_dates = has_value & parsed_dates.isna()
+
+        if invalid_dates.any():
+            raise ValueError(
+                f"Column '{matched_columns['video_publish_time']}' "
+                f"contains {int(invalid_dates.sum())} invalid date value(s)."
+            )
+
+        clean_df["video_publish_time"] = (
+            parsed_dates.dt.strftime("%Y-%m-%d")
+            .where(parsed_dates.notna(), None)
+        )
+
+    # Return a small preview to the API client.
     preview = json.loads(
-        clean_df.head(5).to_json(orient="records", date_format="iso")
+        clean_df.head(5).to_json(
+            orient="records",
+            date_format="iso",
+        )
     )
 
+    # Prepare every validated row for database persistence.
+    records = json.loads(
+        clean_df.to_json(
+            orient="records",
+            date_format="iso",
+        )
+    )
+
+    # Identify the currency declared by the revenue column, if any.
+    revenue_column = matched_columns.get("estimated_revenue", "")
+    revenue_header = normalize_header(revenue_column)
+
+    revenue_currency = None
+
+    if "usd" in revenue_header or "$" in revenue_column:
+        revenue_currency = "USD"
+    elif "inr" in revenue_header or "₹" in revenue_column:
+        revenue_currency = "INR"
+    elif "eur" in revenue_header or "€" in revenue_column:
+        revenue_currency = "EUR"
+    elif "gbp" in revenue_header or "£" in revenue_column:
+        revenue_currency = "GBP"
+
+    # Normalize each record for our database schema.
+    for record in records:
+        record["views"] = int(record["views"])
+
+        if record.get("subscribers") is not None:
+            record["subscribers"] = int(record["subscribers"])
+
+        record["video_publish_date"] = record.pop(
+            "video_publish_time",
+            None,
+        )
+
+        record["revenue_currency"] = revenue_currency
+
+    # Return both the public preview and the internal database records.
     return {
         "row_count": int(len(clean_df)),
         "original_columns": [str(column) for column in df.columns],
@@ -161,4 +256,5 @@ def validate_youtube_analytics_csv(file_bytes: bytes) -> dict:
         "available_metrics": list(clean_df.columns),
         "warnings": warnings,
         "preview": preview,
+        "_records": records,
     }
