@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-
+from app.api.analytics import router as analytics_router
 from app import models
 from app.api.uploads import router as uploads_router
 from app.database import Base, engine, get_db
@@ -24,7 +24,7 @@ app = FastAPI(
 )
 
 app.include_router(uploads_router)
-
+app.include_router(analytics_router)
 
 @app.get("/")
 def root():
